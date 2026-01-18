@@ -1,49 +1,16 @@
 /**
- * Orbit - Multi-Cam v1
- * Turn a single creator video into a bounded parallax orbit preview + high-fidelity exported MP4
+ * Orbit
+ * Generate a 3D preview from a snapshot and produce a new-angle video with Veo 3.1
  */
+
+import type { OutputOrientation, PreviewCameraPose } from './schemas/types';
 
 // Core Types
 export * from './schemas/types';
 
-// Viewer Components
-export { OrbitViewer, WebGPUContext, OrbitCamera, SplatRenderer, SceneLoader } from './viewer/OrbitViewer';
-export type { OrbitViewerConfig, ViewerState } from './viewer/OrbitViewer';
-export type { OrbitScene, SplatAsset } from './viewer/SceneLoader';
-export { CameraPathEditor } from './viewer/CameraPathEditor';
-export type { PathEditorConfig, PathEditorMode, PathEditorState } from './viewer/CameraPathEditor';
-
 // Pipeline
 export { JobOrchestrator } from './pipeline/JobOrchestrator';
 export type { JobConfig, ProgressCallback } from './pipeline/JobOrchestrator';
-
-// Quality Gates
-export { SegmentationGate } from './quality/SegmentationGate';
-export { PoseGate } from './quality/PoseGate';
-export { TrackGate } from './quality/TrackGate';
-export { DepthGate } from './quality/DepthGate';
-export { FallbackDecisionEngine } from './quality/FallbackDecision';
-
-// Reconstruction
-export { BackgroundReconstruction } from './reconstruction/BackgroundReconstruction';
-export { SubjectReconstruction } from './reconstruction/SubjectReconstruction';
-export type { GaussianSplat } from './reconstruction/BackgroundReconstruction';
-export type { Subject4DSplat } from './reconstruction/SubjectReconstruction';
-
-// Refinement
-export { IdentityLock } from './refinement/IdentityLock';
-
-// Rendering
-export { RenderPipeline } from './render/RenderPipeline';
-export type { RenderConfig, RenderFrame } from './render/RenderPipeline';
-
-// Export
-export { MP4Export, downloadBlob } from './export/MP4Export';
-export type { ExportConfig, ExportResult } from './export/MP4Export';
-
-// Debug Artifacts
-export { DebugArtifacts } from './debug/DebugArtifacts';
-export type { DebugConfig, DebugArtifactPaths } from './debug/DebugArtifacts';
 
 // Math Utilities
 export * as math from './utils/math';
@@ -78,6 +45,18 @@ export type {
   VideoDiffusionConfig,
   VideoDiffusionInput,
   VideoDiffusionOutput,
+  SAM3DBodyModel,
+  SAM3DBodyConfig,
+  SAM3DBodyInput,
+  SAM3DBodyOutput,
+  NanoBananaModel,
+  NanoBananaConfig,
+  NanoBananaInput,
+  NanoBananaOutput,
+  VeoModel,
+  VeoConfig,
+  VeoInput,
+  VeoOutput,
 } from './ml/ModelInterface';
 
 // API Client
@@ -89,10 +68,6 @@ export type {
   JobStatusResponse,
   JobResultResponse,
   ProcessingOptions,
-  RenderFrameRequest,
-  RenderFrameResponse,
-  ExportVideoRequest,
-  ExportVideoResponse,
   ApiError,
 } from './api/OrbitAPI';
 
@@ -105,41 +80,29 @@ export { config, setConfig, getEndpointUrl } from './config';
 export type { OrbitConfig } from './config';
 
 /**
- * Quick start: Create and initialize an OrbitViewer
- */
-export async function createOrbitViewer(canvas: HTMLCanvasElement): Promise<import('./viewer/OrbitViewer').OrbitViewer> {
-  const { OrbitViewer } = await import('./viewer/OrbitViewer');
-
-  const viewer = new OrbitViewer({
-    canvas,
-    onProgress: (msg) => console.log('[Orbit]', msg),
-    onError: (err) => console.error('[Orbit Error]', err),
-    onModeChange: (mode) => console.log('[Orbit Mode]', mode),
-  });
-
-  await viewer.initialize();
-  return viewer;
-}
-
-/**
  * Quick start: Process a video through the full pipeline
  */
 export async function processVideo(
   inputPath: string,
   outputPath: string,
-  onProgress?: (stage: string, progress: number) => void
+  onProgressOrOptions?: ((stage: string, progress: number) => void) | ProcessVideoOptions
 ): Promise<import('./pipeline/JobOrchestrator').JobResult> {
   const { JobOrchestrator } = await import('./pipeline/JobOrchestrator');
 
   const orchestrator = new JobOrchestrator();
   const jobId = `job_${Date.now()}`;
+  const options =
+    typeof onProgressOrOptions === 'function' ? { onProgress: onProgressOrOptions } : onProgressOrOptions;
 
   await orchestrator.submitJob({
     id: jobId,
     inputPath,
     outputPath,
+    orientation: options?.orientation,
+    cameraPose: options?.cameraPose,
+    snapshotTimeSec: options?.snapshotTimeSec,
     onProgress: (event) => {
-      onProgress?.(event.stage, event.progress);
+      options?.onProgress?.(event.stage, event.progress);
     },
   });
 
@@ -155,7 +118,14 @@ export async function processVideo(
   });
 }
 
+export interface ProcessVideoOptions {
+  orientation?: OutputOrientation;
+  cameraPose?: PreviewCameraPose;
+  snapshotTimeSec?: number;
+  onProgress?: (stage: string, progress: number) => void;
+}
+
 // Version info
 export const VERSION = '1.0.0';
 export const NAME = 'Orbit';
-export const DESCRIPTION = 'Turn a single creator video into a bounded parallax orbit preview + high-fidelity exported MP4';
+export const DESCRIPTION = 'Create a single-frame 3D preview and generate a new-angle video with Veo 3.1';

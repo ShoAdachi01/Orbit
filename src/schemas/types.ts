@@ -250,15 +250,22 @@ export type JobStatus =
 /** Pipeline stage */
 export type PipelineStage =
   | 'upload'
-  | 'segmentation'
-  | 'pose-estimation'
-  | 'depth-estimation'
-  | 'tracking'
-  | 'background-reconstruction'
-  | 'subject-reconstruction'
-  | 'base-render'
-  | 'refinement'
-  | 'export';
+  | 'snapshot'
+  | 'reconstruction'
+  | 'preview-generation'
+  | 'veo-generation';
+
+// ============================================================================
+// Preview + Veo Generation
+// ============================================================================
+
+export type OutputOrientation = 'horizontal' | 'vertical';
+
+export interface PreviewCameraPose {
+  position: Vector3;
+  rotation: Quaternion;
+  fov?: number;
+}
 
 /** Progress event */
 export interface ProgressEvent {
@@ -273,14 +280,16 @@ export interface ProgressEvent {
 export interface JobResult {
   jobId: string;
   status: JobStatus;
-  /** OrbitScene pack path (if successful) */
-  scenePackPath?: string;
-  /** Base render path */
-  baseRenderPath?: string;
-  /** Final refined render path */
-  finalRenderPath?: string;
-  /** Quality report */
-  quality?: QualityReport;
+  /** Snapshot image path */
+  snapshotPath?: string;
+  /** 3D reconstruction asset path */
+  reconstructionPath?: string;
+  /** Preview still path */
+  previewImagePath?: string;
+  /** Veo-generated video path */
+  veoVideoPath?: string;
+  /** Output orientation */
+  orientation?: OutputOrientation;
   /** Error message (if failed) */
   error?: string;
 }

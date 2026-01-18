@@ -102,6 +102,86 @@ def load_video_frames(
     return frames, width, height, fps
 
 
+def get_video_metadata(video_path: str) -> Tuple[int, int, float, float]:
+    """
+    Return (width, height, fps, duration_sec) for a video file.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {video_path}")
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    duration = frame_count / fps if fps > 0 else 0.0
+    cap.release()
+
+    return width, height, fps, duration
+
+
+def load_video_frame(
+    video_path: str,
+    time_sec: float,
+) -> Tuple[np.ndarray, float]:
+    """
+    Load a single RGB frame at the requested timestamp.
+
+    Returns (frame_rgb, fps).
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_index = max(int(time_sec * fps), 0)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    ret, frame = cap.read()
+
+    if not ret:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            raise ValueError(f"Failed to read frame at {time_sec}s")
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    cap.release()
+    return frame_rgb, fps
+
+
+def save_image(frame: np.ndarray, output_path: str) -> str:
+    """
+    Save an RGB frame to disk as a JPEG.
+    """
+    import cv2
+
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(output_path, frame_bgr)
+    return output_path
+
+
+def apply_orientation(frame: np.ndarray, orientation: Optional[str]) -> np.ndarray:
+    """
+    Rotate frame to match requested orientation when needed.
+    """
+    import cv2
+
+    if not orientation:
+        return frame
+
+    height, width = frame.shape[:2]
+    if orientation == "vertical" and width > height:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if orientation == "horizontal" and height > width:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    return frame
+
+
 def save_video_frames(
     frames: List[np.ndarray],
     output_path: str,

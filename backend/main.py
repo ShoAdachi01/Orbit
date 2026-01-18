@@ -7,6 +7,7 @@ Local test: modal run backend/main.py
 """
 
 import modal
+import os
 from typing import List, Optional, Tuple
 from pathlib import Path
 import json
@@ -30,6 +31,27 @@ VOLUME_PATH = "/data"
 # Job status storage
 job_store = modal.Dict.from_name("orbit-jobs-store", create_if_missing=True)
 
+
+def _load_orbit_secrets() -> list:
+    secret_name = os.environ.get("ORBIT_MODAL_SECRET_NAME")
+    secrets = []
+
+    if secret_name:
+        try:
+            secrets.append(modal.Secret.from_name(secret_name))
+        except Exception as e:
+            print(f"[Orbit] Failed to load Modal secret {secret_name}: {e}")
+    else:
+        try:
+            secrets.append(modal.Secret.from_dotenv())
+        except Exception:
+            pass
+
+    return secrets
+
+
+ORBIT_SECRETS = _load_orbit_secrets()
+
 # Video upload limits
 MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500MB
 ALLOWED_EXTENSIONS = {'.mp4', '.mov', '.webm', '.avi', '.mkv'}
@@ -47,6 +69,7 @@ ORCHESTRATOR_IMAGE = (
         "pillow",
         "pydantic",
         "fastapi[standard]",
+        "httpx",
         "scipy",  # For cKDTree in reconstruction
     )
     .add_local_python_source("utils")
@@ -102,6 +125,26 @@ DEPTH_IMAGE = (
     )
 )
 
+SAM3D_BODY_IMAGE = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git", "ffmpeg", "libsm6", "libxext6", "libgl1-mesa-glx")
+    .pip_install(
+        "torch>=2.1.0",
+        "torchvision",
+        "numpy",
+        "opencv-python-headless",
+        "pillow",
+        "trimesh",
+        "scipy",
+        "pydantic",
+    )
+    .run_commands(
+        "git clone --depth 1 https://github.com/facebookresearch/sam-3d-body.git /opt/sam3d_body",
+        "pip install -e /opt/sam3d_body",
+    )
+    .add_local_python_source("utils")
+)
+
 COLMAP_IMAGE = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install(
@@ -141,6 +184,12 @@ class SubmitJobRequest(BaseModel):
     fps: float = 30.0
     max_frames: int = 150  # Max frames to extract from video
     target_fps: float = 10.0  # Target FPS for frame extraction
+    snapshot_time_sec: float = 1.0
+    segment_start_sec: Optional[float] = None
+    segment_end_sec: Optional[float] = None
+    orientation: Optional[str] = None
+    camera_pose: Optional[dict] = None
+    pipeline: str = "generation"  # reconstruction | generation
     prompt_points: Optional[List[dict]] = None
     options: Optional[dict] = None
 
@@ -160,7 +209,7 @@ class JobStatus(BaseModel):
 # SAM2 Segmentation Service
 # ============================================================================
 
-@app.cls(image=SAM2_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, timeout=600)
+@app.cls(image=SAM2_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=600)
 class SAM2Service:
     """SAM2 video segmentation service."""
 
@@ -339,10 +388,193 @@ class SAM2Service:
 
 
 # ============================================================================
+# SAM3D Body Reconstruction Service
+# ============================================================================
+
+@app.cls(image=SAM3D_BODY_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=1200)
+class SAM3DBodyService:
+    """SAM3D Body reconstruction service."""
+
+    @modal.enter()
+    def load_model(self):
+        """Load SAM3D Body model on container startup."""
+        import torch
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.entrypoint = os.environ.get("SAM3D_BODY_ENTRYPOINT")
+        self.args_template = os.environ.get(
+            "SAM3D_BODY_ARGS",
+            "--image {image} --output {out}",
+        )
+        self.predictor = None
+        self.load_error = None
+
+        try:
+            self.predictor = self._load_predictor()
+            if self.predictor:
+                print("[SAM3D Body] Predictor loaded")
+            else:
+                print("[SAM3D Body] No predictor found, using entrypoint runner")
+        except Exception as e:
+            self.load_error = str(e)
+            self.predictor = None
+            print(f"[SAM3D Body] Model loading failed: {e}")
+
+    def _load_predictor(self):
+        import importlib
+
+        candidates = [
+            ("sam3d_body.inference", "SAM3DBodyPredictor"),
+            ("sam3d_body.inference", "Sam3DBodyPredictor"),
+            ("sam3d_body.api", "SAM3DBodyPredictor"),
+            ("sam3d_body.api", "Sam3DBodyPredictor"),
+        ]
+
+        for module_name, class_name in candidates:
+            try:
+                module = importlib.import_module(module_name)
+                predictor_cls = getattr(module, class_name, None)
+                if predictor_cls:
+                    return predictor_cls()
+            except Exception:
+                continue
+
+        return None
+
+    def _discover_entrypoint(self) -> Optional[str]:
+        base = Path("/opt/sam3d_body")
+        candidates = [
+            "demo.py",
+            "inference.py",
+            "infer.py",
+            "scripts/demo.py",
+            "scripts/inference.py",
+            "scripts/infer.py",
+            "tools/demo.py",
+            "tools/inference.py",
+            "tools/infer.py",
+        ]
+
+        for candidate in candidates:
+            entry = base / candidate
+            if entry.exists():
+                return str(entry)
+
+        return None
+
+    def _find_mesh_file(self, output_dir: Path) -> str:
+        candidates = []
+        for ext in ("*.obj", "*.ply", "*.glb", "*.gltf"):
+            candidates.extend(output_dir.glob(ext))
+
+        if not candidates:
+            raise RuntimeError("SAM3D Body output mesh not found in output directory.")
+
+        return str(sorted(candidates)[0])
+
+    def _run_entrypoint(self, image_path: str, output_dir: Path) -> str:
+        import shlex
+        import subprocess
+        import sys
+
+        entrypoint = self.entrypoint or self._discover_entrypoint()
+        if not entrypoint:
+            raise RuntimeError(
+                "SAM3D Body entrypoint not configured. Set SAM3D_BODY_ENTRYPOINT."
+            )
+
+        args = self.args_template.format(image=image_path, out=str(output_dir))
+        cmd = [sys.executable, entrypoint] + shlex.split(args)
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or "SAM3D Body inference failed.")
+
+        return self._find_mesh_file(output_dir)
+
+    def _load_mesh(self, mesh_path: str) -> dict:
+        import numpy as np
+        import trimesh
+        from utils.mesh import serialize_mesh, compute_bounds
+
+        mesh = trimesh.load(mesh_path, process=False)
+        if isinstance(mesh, trimesh.Scene):
+            geometries = [geom for geom in mesh.geometry.values()]
+            if not geometries:
+                raise RuntimeError("SAM3D Body mesh scene is empty.")
+            mesh = trimesh.util.concatenate(geometries)
+
+        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        faces = np.asarray(mesh.faces, dtype=np.int64) if mesh.faces is not None else np.zeros((0, 3), dtype=np.int64)
+
+        data = serialize_mesh(vertices, faces, mesh_format="sam3d-body")
+        data["bounds"] = compute_bounds(data["vertices"])
+        return data
+
+    def _predictor_output_to_mesh(self, output: object) -> Optional[dict]:
+        from utils.mesh import serialize_mesh, compute_bounds
+
+        if isinstance(output, dict):
+            if "vertices" in output and "faces" in output:
+                data = serialize_mesh(output["vertices"], output["faces"], mesh_format="sam3d-body")
+                data["bounds"] = compute_bounds(data["vertices"])
+                return data
+
+            mesh_path = output.get("mesh_path") or output.get("path")
+            if mesh_path:
+                return self._load_mesh(str(mesh_path))
+
+        return None
+
+    def _run_predictor(self, image_path: str) -> Optional[dict]:
+        from PIL import Image
+
+        if not self.predictor:
+            return None
+
+        try:
+            image = Image.open(image_path).convert("RGB")
+
+            if hasattr(self.predictor, "predict"):
+                output = self.predictor.predict(image)
+            elif hasattr(self.predictor, "run"):
+                output = self.predictor.run(image)
+            elif callable(self.predictor):
+                output = self.predictor(image)
+            else:
+                raise RuntimeError("SAM3D Body predictor has no callable interface.")
+
+            return self._predictor_output_to_mesh(output)
+        except Exception as e:
+            print(f"[SAM3D Body] Predictor inference failed: {e}")
+            return None
+
+    @modal.method()
+    def reconstruct(
+        self,
+        job_id: str,
+        image_path: str,
+        output_dir: Optional[str] = None,
+    ) -> dict:
+        """Run SAM3D Body on a single image and return mesh data."""
+        output_path = Path(output_dir) if output_dir else Path(VOLUME_PATH) / job_id / "sam3d_body"
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        mesh_data = self._run_predictor(image_path)
+        if mesh_data:
+            volume.commit()
+            return mesh_data
+
+        mesh_path = self._run_entrypoint(image_path, output_path)
+        mesh_data = self._load_mesh(mesh_path)
+        volume.commit()
+        return mesh_data
+
+# ============================================================================
 # TAPIR Tracking Service
 # ============================================================================
 
-@app.cls(image=TAPIR_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, timeout=600)
+@app.cls(image=TAPIR_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=600)
 class TAPIRService:
     """TAPIR point tracking service."""
 
@@ -550,7 +782,7 @@ class TAPIRService:
 # DepthCrafter Depth Estimation Service
 # ============================================================================
 
-@app.cls(image=DEPTH_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, timeout=900)
+@app.cls(image=DEPTH_IMAGE, gpu=GPU_A100, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=900)
 class DepthCrafterService:
     """DepthCrafter video depth estimation service."""
 
@@ -696,7 +928,7 @@ class DepthCrafterService:
 # COLMAP Pose Estimation Service
 # ============================================================================
 
-@app.cls(image=COLMAP_IMAGE, gpu=GPU_A10G, volumes={VOLUME_PATH: volume}, timeout=1200)
+@app.cls(image=COLMAP_IMAGE, gpu=GPU_A10G, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=1200)
 class COLMAPService:
     """COLMAP structure-from-motion service."""
 
@@ -1450,7 +1682,7 @@ def fastapi_app():
     # Import FastAPI only when this function runs (ORCHESTRATOR_IMAGE only)
     from fastapi import FastAPI, File, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
-    from utils.video import load_video_frames, encode_frames
+    from utils.video import decode_frames, get_video_metadata, save_video_frames
 
     web_app = FastAPI(title="Orbit Backend API")
     web_app.add_middleware(
@@ -1477,48 +1709,65 @@ def fastapi_app():
             "updated_at": now,
         }
 
-        frames_bytes = []
+        pipeline = (request.pipeline or "generation").lower()
+        if pipeline not in ["reconstruction", "generation"]:
+            return {"error": f"Invalid pipeline: {pipeline}. Use reconstruction or generation."}
+
         width = request.width
         height = request.height
+        video_path = None
 
         if request.video_id:
-            # Reload volume to see recently uploaded files
             volume.reload()
-
-            # Load frames from uploaded video file
             upload_dir = Path(VOLUME_PATH) / "uploads"
             video_path = next(upload_dir.glob(f"{request.video_id}.*"), None)
 
             if not video_path:
                 return {"error": f"Video not found: {request.video_id}"}
-
-            np_frames, width, height, fps = load_video_frames(
-                str(video_path),
-                max_frames=request.max_frames,
-                target_fps=request.target_fps,
-            )
-            frames_bytes = encode_frames(np_frames)
-            print(f"[submit_job] Loaded {len(frames_bytes)} frames from {video_path} at {width}x{height}")
-
         elif request.frames:
-            # Decode frames from base64 (backwards compatibility)
-            for frame_b64 in request.frames:
-                frames_bytes.append(base64.b64decode(frame_b64))
+            if width is None or height is None:
+                return {"error": "Width and height required when using base64 frames."}
 
-        if not frames_bytes:
-            return {"error": "No frames provided. Supply either video_id or frames."}
+            output_dir = Path(VOLUME_PATH) / job_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            video_path = output_dir / "input.mp4"
+
+            frame_bytes = [base64.b64decode(frame_b64) for frame_b64 in request.frames]
+            frames_np = decode_frames(frame_bytes, width, height)
+            save_video_frames(frames_np, str(video_path), fps=request.fps)
+            volume.commit()
+
+        if not video_path:
+            return {"error": "No video source provided. Supply video_id or frames."}
 
         if width is None or height is None:
-            return {"error": "Width and height required when using base64 frames."}
+            width, height, _, _ = get_video_metadata(str(video_path))
 
-        # Spawn pipeline using direct function reference (same Modal app)
-        process_pipeline.spawn(
-            job_id=job_id,
-            frames=frames_bytes,
-            width=width,
-            height=height,
-            prompt_points=request.prompt_points,
-        )
+        if pipeline == "reconstruction":
+            process_reconstruction.spawn(
+                job_id=job_id,
+                video_path=str(video_path),
+                snapshot_time_sec=request.snapshot_time_sec,
+                orientation=request.orientation,
+                segment_start_sec=request.segment_start_sec,
+                segment_end_sec=request.segment_end_sec,
+            )
+        else:
+            duration_sec = None
+            if request.options and isinstance(request.options, dict):
+                duration_sec = request.options.get("duration_sec")
+
+            process_generation.spawn(
+                job_id=job_id,
+                video_path=str(video_path),
+                snapshot_time_sec=request.snapshot_time_sec,
+                orientation=request.orientation,
+                camera_pose=request.camera_pose,
+                duration_sec=duration_sec,
+                options=request.options,
+                segment_start_sec=request.segment_start_sec,
+                segment_end_sec=request.segment_end_sec,
+            )
 
         return {"job_id": job_id, "status": "pending", "message": "Job submitted"}
 
@@ -1608,6 +1857,36 @@ def fastapi_app():
             "filename": file.filename,
         }
 
+    @web_app.get("/get_asset")
+    def get_asset_route(job_id: str, filename: str):
+        """Serve generated assets (snapshot, preview, reconstruction, video)."""
+        from starlette.responses import FileResponse
+
+        volume.reload()
+
+        allowed_files = [
+            "snapshot.jpg",
+            "preview.jpg",
+            "veo.mp4",
+            "reconstruction.json",
+        ]
+
+        if filename not in allowed_files:
+            return {"error": f"Invalid filename: {filename}"}
+
+        file_path = Path(VOLUME_PATH) / job_id / "assets" / filename
+        if not file_path.exists():
+            return {"error": f"File not found: {filename}"}
+
+        if filename.endswith(".json"):
+            content_type = "application/json"
+        elif filename.endswith(".mp4"):
+            content_type = "video/mp4"
+        else:
+            content_type = "image/jpeg"
+
+        return FileResponse(str(file_path), media_type=content_type)
+
     @web_app.get("/get_scene_file")
     def get_scene_file_route(job_id: str, filename: str):
         """Serve scene pack files (manifest.json, camera.json, quality.json, *.splat)."""
@@ -1634,7 +1913,7 @@ def fastapi_app():
 # Pipeline Processing
 # ============================================================================
 
-@app.function(image=ORCHESTRATOR_IMAGE, volumes={VOLUME_PATH: volume}, timeout=3600)
+@app.function(image=ORCHESTRATOR_IMAGE, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=3600)
 def process_pipeline(
     job_id: str,
     frames: List[bytes],
@@ -1775,6 +2054,391 @@ def process_pipeline(
             "updated_at": datetime.utcnow().isoformat(),
         }
         raise
+
+
+# ============================================================================
+# New Snapshot Pipeline (SAM3D -> Preview -> Veo)
+# ============================================================================
+
+def _asset_url(job_id: str, filename: str) -> str:
+    return f"/get_asset?job_id={job_id}&filename={filename}"
+
+
+@app.function(image=ORCHESTRATOR_IMAGE, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=3600)
+def process_reconstruction(
+    job_id: str,
+    video_path: str,
+    snapshot_time_sec: float,
+    orientation: Optional[str] = None,
+    segment_start_sec: Optional[float] = None,
+    segment_end_sec: Optional[float] = None,
+) -> dict:
+    """Extract snapshot and generate a SAM3D Body mesh."""
+    from utils.video import load_video_frame, get_video_metadata, save_image, apply_orientation
+    from utils.mesh import create_placeholder_mesh, compute_bounds
+
+    def update_status(stage: str, progress: float, message: str):
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "processing",
+            "stage": stage,
+            "progress": progress,
+            "message": message,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+    try:
+        segment_start = max(segment_start_sec or 0.0, 0.0)
+        segment_end = segment_end_sec if segment_end_sec is not None else None
+        if segment_end is not None and segment_end <= segment_start:
+            segment_end = None
+
+        snapshot_offset = max(snapshot_time_sec, 0.0)
+        snapshot_time = snapshot_offset + segment_start
+
+        width, height, _, duration = get_video_metadata(video_path)
+        if segment_end is not None:
+            segment_end = min(segment_end, duration)
+            snapshot_time = min(snapshot_time, segment_end)
+        else:
+            snapshot_time = min(snapshot_time, duration)
+
+        update_status("snapshot", 0.0, "Extracting snapshot...")
+        frame, fps = load_video_frame(video_path, snapshot_time)
+        frame = apply_orientation(frame, orientation)
+
+        output_dir = Path(VOLUME_PATH) / job_id
+        assets_dir = output_dir / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot_path = assets_dir / "snapshot.jpg"
+        save_image(frame, str(snapshot_path))
+        update_status("snapshot", 100.0, "Snapshot ready")
+
+        update_status("reconstruction", 0.0, "Running SAM3D Body...")
+        mesh = None
+        fallback_error = None
+        allow_fallback = os.environ.get("SAM3D_BODY_FALLBACK", "1") == "1"
+
+        try:
+            mesh = SAM3DBodyService().reconstruct.remote(
+                job_id=job_id,
+                image_path=str(snapshot_path),
+            )
+        except Exception as e:
+            fallback_error = str(e)
+            if allow_fallback:
+                mesh = create_placeholder_mesh()
+            else:
+                raise
+
+        if not mesh:
+            raise RuntimeError("SAM3D Body did not return a mesh.")
+
+        if "bounds" not in mesh:
+            mesh["bounds"] = compute_bounds(mesh["vertices"])
+
+        if fallback_error:
+            mesh["warning"] = f"SAM3D Body fallback: {fallback_error}"
+
+        reconstruction_path = assets_dir / "reconstruction.json"
+        with open(reconstruction_path, "w") as f:
+            json.dump(mesh, f)
+        update_status("reconstruction", 100.0, "Reconstruction complete")
+
+        segment_duration = duration
+        if segment_end is not None:
+            segment_duration = max(segment_end - segment_start, 0.0)
+        if orientation == "vertical" and width > height:
+            width, height = height, width
+        if orientation == "horizontal" and height > width:
+            width, height = height, width
+
+        result = {
+            "job_id": job_id,
+            "status": "completed",
+            "snapshot_url": _asset_url(job_id, "snapshot.jpg"),
+            "reconstruction_url": _asset_url(job_id, "reconstruction.json"),
+            "orientation": orientation or "horizontal",
+            "metadata": {
+                "duration": segment_duration,
+                "width": width,
+                "height": height,
+                "fps": fps,
+            },
+            "segment": {
+                "start_sec": segment_start,
+                "end_sec": segment_end,
+            },
+        }
+
+        with open(output_dir / "result.json", "w") as f:
+            json.dump(result, f, indent=2)
+
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "completed",
+            "stage": "reconstruction",
+            "progress": 100.0,
+            "message": "Reconstruction complete",
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        volume.commit()
+        return result
+    except Exception as e:
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "failed",
+            "stage": "reconstruction",
+            "progress": 0.0,
+            "message": str(e),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        return {"error": str(e), "job_id": job_id}
+
+
+@app.function(image=ORCHESTRATOR_IMAGE, volumes={VOLUME_PATH: volume}, secrets=ORBIT_SECRETS, timeout=3600)
+def process_generation(
+    job_id: str,
+    video_path: str,
+    snapshot_time_sec: float,
+    orientation: Optional[str] = None,
+    camera_pose: Optional[dict] = None,
+    duration_sec: Optional[float] = None,
+    options: Optional[dict] = None,
+    segment_start_sec: Optional[float] = None,
+    segment_end_sec: Optional[float] = None,
+) -> dict:
+    """Generate preview still and Veo video."""
+    from utils.video import (
+        load_video_frame,
+        get_video_metadata,
+        save_image,
+        save_video_frames,
+        apply_orientation,
+    )
+    from utils.remote import (
+        request_remote_asset,
+        download_to_path,
+        encode_base64_bytes,
+    )
+    import shutil
+
+    def update_status(stage: str, progress: float, message: str):
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "processing",
+            "stage": stage,
+            "progress": progress,
+            "message": message,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+    try:
+        segment_start = max(segment_start_sec or 0.0, 0.0)
+        segment_end = segment_end_sec if segment_end_sec is not None else None
+        if segment_end is not None and segment_end <= segment_start:
+            segment_end = None
+
+        snapshot_offset = max(snapshot_time_sec, 0.0)
+        snapshot_time = snapshot_offset + segment_start
+
+        width, height, _, duration = get_video_metadata(video_path)
+        if segment_end is not None:
+            segment_end = min(segment_end, duration)
+            snapshot_time = min(snapshot_time, segment_end)
+        else:
+            snapshot_time = min(snapshot_time, duration)
+
+        update_status("snapshot", 0.0, "Extracting snapshot...")
+        frame, fps = load_video_frame(video_path, snapshot_time)
+        frame = apply_orientation(frame, orientation)
+
+        output_dir = Path(VOLUME_PATH) / job_id
+        assets_dir = output_dir / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot_path = assets_dir / "snapshot.jpg"
+        save_image(frame, str(snapshot_path))
+        update_status("snapshot", 100.0, "Snapshot ready")
+
+        if orientation == "vertical" and width > height:
+            width, height = height, width
+        if orientation == "horizontal" and height > width:
+            width, height = height, width
+
+        update_status("preview-generation", 0.0, "Generating preview still...")
+        preview_path = assets_dir / "preview.jpg"
+        warnings = []
+        options = options or {}
+
+        nano_url = os.environ.get("NANO_BANANA_API_URL")
+        nano_key = os.environ.get("NANO_BANANA_API_KEY")
+        nano_timeout = float(os.environ.get("NANO_BANANA_TIMEOUT_SEC", "300"))
+        nano_poll_timeout = float(os.environ.get("NANO_BANANA_POLL_TIMEOUT_SEC", "900"))
+        nano_poll_interval = float(os.environ.get("NANO_BANANA_POLL_INTERVAL_SEC", "5"))
+        nano_fallback = os.environ.get("NANO_BANANA_FALLBACK", "1") == "1"
+
+        if nano_url:
+            try:
+                with open(snapshot_path, "rb") as f:
+                    snapshot_b64 = encode_base64_bytes(f.read())
+
+                payload = {
+                    "reference_image_b64": snapshot_b64,
+                    "orientation": orientation or "horizontal",
+                    "width": width,
+                    "height": height,
+                    "camera_pose": camera_pose,
+                    "prompt": options.get("prompt"),
+                    "context": options.get("context"),
+                    "options": options or None,
+                }
+
+                asset_bytes, asset_url = request_remote_asset(
+                    nano_url,
+                    payload,
+                    kind="image",
+                    api_key=nano_key,
+                    timeout_sec=nano_timeout,
+                    poll_timeout_sec=nano_poll_timeout,
+                    poll_interval_sec=nano_poll_interval,
+                )
+
+                if asset_url:
+                    download_to_path(asset_url, str(preview_path), timeout_sec=nano_timeout)
+                elif asset_bytes:
+                    with open(preview_path, "wb") as f:
+                        f.write(asset_bytes)
+                else:
+                    raise RuntimeError("Nano Banana response missing image data.")
+            except Exception as e:
+                if nano_fallback:
+                    warnings.append(f"Nano Banana fallback: {e}")
+                    shutil.copyfile(snapshot_path, preview_path)
+                else:
+                    raise
+        else:
+            if nano_fallback:
+                warnings.append("Nano Banana API not configured.")
+                shutil.copyfile(snapshot_path, preview_path)
+            else:
+                raise RuntimeError("Nano Banana API not configured.")
+
+        update_status("preview-generation", 100.0, "Preview complete")
+
+        update_status("veo-generation", 0.0, "Generating Veo video...")
+        segment_duration = duration
+        if segment_end is not None:
+            segment_duration = max(segment_end - segment_start, 0.0)
+        target_duration = duration_sec if duration_sec is not None else options.get("duration_sec", segment_duration)
+        target_duration = max(target_duration, 1.0)
+
+        veo_path = assets_dir / "veo.mp4"
+        veo_url = os.environ.get("VEO_API_URL")
+        veo_key = os.environ.get("VEO_API_KEY")
+        veo_timeout = float(os.environ.get("VEO_TIMEOUT_SEC", "900"))
+        veo_poll_timeout = float(os.environ.get("VEO_POLL_TIMEOUT_SEC", "3600"))
+        veo_poll_interval = float(os.environ.get("VEO_POLL_INTERVAL_SEC", "10"))
+        veo_fallback = os.environ.get("VEO_FALLBACK", "1") == "1"
+
+        if veo_url:
+            try:
+                with open(preview_path, "rb") as f:
+                    preview_b64 = encode_base64_bytes(f.read())
+
+                payload = {
+                    "reference_image_b64": preview_b64,
+                    "orientation": orientation or "horizontal",
+                    "width": width,
+                    "height": height,
+                    "duration_sec": target_duration,
+                    "camera_pose": camera_pose,
+                    "fps": fps,
+                    "prompt": options.get("prompt"),
+                    "context": options.get("context"),
+                    "options": options or None,
+                }
+
+                asset_bytes, asset_url = request_remote_asset(
+                    veo_url,
+                    payload,
+                    kind="video",
+                    api_key=veo_key,
+                    timeout_sec=veo_timeout,
+                    poll_timeout_sec=veo_poll_timeout,
+                    poll_interval_sec=veo_poll_interval,
+                )
+
+                if asset_url:
+                    download_to_path(asset_url, str(veo_path), timeout_sec=veo_timeout)
+                elif asset_bytes:
+                    with open(veo_path, "wb") as f:
+                        f.write(asset_bytes)
+                else:
+                    raise RuntimeError("Veo response missing video data.")
+            except Exception as e:
+                if veo_fallback:
+                    warnings.append(f"Veo fallback: {e}")
+                    frame_count = int(target_duration * fps)
+                    frames = [frame for _ in range(max(frame_count, 1))]
+                    save_video_frames(frames, str(veo_path), fps=fps)
+                else:
+                    raise
+        else:
+            if veo_fallback:
+                warnings.append("Veo API not configured.")
+                frame_count = int(target_duration * fps)
+                frames = [frame for _ in range(max(frame_count, 1))]
+                save_video_frames(frames, str(veo_path), fps=fps)
+            else:
+                raise RuntimeError("Veo API not configured.")
+
+        update_status("veo-generation", 100.0, "Veo generation complete")
+
+        result = {
+            "job_id": job_id,
+            "status": "completed",
+            "snapshot_url": _asset_url(job_id, "snapshot.jpg"),
+            "preview_image_url": _asset_url(job_id, "preview.jpg"),
+            "veo_video_url": _asset_url(job_id, "veo.mp4"),
+            "orientation": orientation or "horizontal",
+            "warnings": warnings,
+            "metadata": {
+                "duration": target_duration,
+                "width": width,
+                "height": height,
+                "fps": fps,
+            },
+            "segment": {
+                "start_sec": segment_start,
+                "end_sec": segment_end,
+            },
+        }
+
+        with open(output_dir / "result.json", "w") as f:
+            json.dump(result, f, indent=2)
+
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "completed",
+            "stage": "veo-generation",
+            "progress": 100.0,
+            "message": "Generation complete",
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        volume.commit()
+        return result
+    except Exception as e:
+        job_store[job_id] = {
+            **dict(job_store.get(job_id, {})),
+            "status": "failed",
+            "stage": "veo-generation",
+            "progress": 0.0,
+            "message": str(e),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        return {"error": str(e), "job_id": job_id}
 
 
 # ============================================================================

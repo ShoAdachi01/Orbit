@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orbit - Multi-Cam v1</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0a0a0a;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1rem 2rem;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo {
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .mode-badge {
+      padding: 0.25rem 0.75rem;
+      border-radius: 1rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .mode-full-orbit { background: #22c55e22; color: #22c55e; }
+    .mode-micro-parallax { background: #eab30822; color: #eab308; }
+    .mode-2-5d-subject { background: #f9731622; color: #f97316; }
+    .mode-render-only { background: #ef444422; color: #ef4444; }
+
+    main {
+      flex: 1;
+      display: flex;
+      gap: 1rem;
+      padding: 1rem;
+    }
+
+    .viewer-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #111;
+      border-radius: 0.5rem;
+      overflow: hidden;
+    }
+
+    #orbit-canvas {
+      flex: 1;
+      width: 100%;
+      min-height: 400px;
+    }
+
+    .viewer-controls {
+      padding: 1rem;
+      background: #0d0d0d;
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .sidebar {
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .panel {
+      background: #111;
+      border-radius: 0.5rem;
+      padding: 1rem;
+    }
+
+    .panel-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+    }
+
+    .upload-zone {
+      border: 2px dashed #333;
+      border-radius: 0.5rem;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .upload-zone:hover {
+      border-color: #6366f1;
+      background: #6366f108;
+    }
+
+    .upload-zone.dragging {
+      border-color: #6366f1;
+      background: #6366f115;
+    }
+
+    .upload-icon {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .upload-text {
+      color: #888;
+      font-size: 0.875rem;
+    }
+
+    .upload-hint {
+      color: #555;
+      font-size: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    button {
+      background: #6366f1;
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    button:hover {
+      background: #4f46e5;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    button.secondary {
+      background: #222;
+    }
+
+    button.secondary:hover {
+      background: #333;
+    }
+
+    .progress-bar {
+      height: 4px;
+      background: #222;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6);
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    .status-text {
+      font-size: 0.75rem;
+      color: #888;
+      margin-top: 0.5rem;
+    }
+
+    .quality-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.5rem;
+    }
+
+    .metric {
+      background: #0d0d0d;
+      padding: 0.75rem;
+      border-radius: 0.375rem;
+    }
+
+    .metric-label {
+      font-size: 0.625rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .metric-value {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-top: 0.25rem;
+    }
+
+    .metric-value.good { color: #22c55e; }
+    .metric-value.warning { color: #eab308; }
+    .metric-value.bad { color: #ef4444; }
+
+    .orbit-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .control-label {
+      font-size: 0.75rem;
+      color: #888;
+    }
+
+    .control-value {
+      font-size: 0.875rem;
+      font-weight: 500;
+      font-family: 'Monaco', 'Menlo', monospace;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      background: #333;
+      border-radius: 2px;
+      margin-top: 0.25rem;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: #6366f1;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .error-message {
+      background: #ef444422;
+      border: 1px solid #ef4444;
+      color: #ef4444;
+      padding: 0.75rem;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">Orbit</div>
+    <div id="mode-badge" class="mode-badge mode-full-orbit hidden">Full Orbit</div>
+  </header>
+
+  <main>
+    <div class="viewer-container">
+      <canvas id="orbit-canvas"></canvas>
+      <div class="viewer-controls">
+        <button id="reset-btn" class="secondary" disabled>Reset View</button>
+        <button id="play-btn" class="secondary" disabled>Play Path</button>
+        <button id="export-btn" disabled>Export MP4</button>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="panel">
+        <div class="panel-title">Upload Video</div>
+        <div id="upload-zone" class="upload-zone">
+          <div class="upload-icon">📹</div>
+          <div class="upload-text">Drop video here or click to browse</div>
+          <div class="upload-hint">MP4, MOV, WebM • 5-60 seconds recommended</div>
+        </div>
+        <input type="file" id="file-input" accept="video/*">
+        <div id="progress-section" class="hidden">
+          <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+          <div id="status-text" class="status-text">Processing...</div>
+        </div>
+        <div id="error-message" class="error-message hidden"></div>
+      </div>
+
+      <div id="quality-panel" class="panel hidden">
+        <div class="panel-title">Quality Report</div>
+        <div class="quality-metrics">
+          <div class="metric">
+            <div class="metric-label">Mask</div>
+            <div id="mask-score" class="metric-value">--</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Pose</div>
+            <div id="pose-score" class="metric-value">--</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Tracks</div>
+            <div id="track-score" class="metric-value">--</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Depth</div>
+            <div id="depth-score" class="metric-value">--</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="orbit-panel" class="panel hidden">
+        <div class="panel-title">Orbit Controls</div>
+        <div class="orbit-controls">
+          <div class="control-row">
+            <span class="control-label">Yaw</span>
+            <span id="yaw-value" class="control-value">0°</span>
+          </div>
+          <input type="range" id="yaw-slider" min="-20" max="20" value="0">
+
+          <div class="control-row">
+            <span class="control-label">Pitch</span>
+            <span id="pitch-value" class="control-value">0°</span>
+          </div>
+          <input type="range" id="pitch-slider" min="-10" max="10" value="0">
+
+          <div class="control-row">
+            <span class="control-label">Roll</span>
+            <span id="roll-value" class="control-value">0°</span>
+          </div>
+          <input type="range" id="roll-slider" min="-3" max="3" value="0" step="0.1">
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { createOrbitViewer, processVideo, SceneLoader, downloadBlob } from './src/index.ts';
+    import { ModalClient } from './src/api/ModalClient.ts';
+    import { getScenePackUrl } from './src/config.ts';
+
+    // Initialize Modal client
+    const modalClient = new ModalClient();
+    let currentJobId = null;
+
+    // DOM Elements
+    const canvas = document.getElementById('orbit-canvas');
+    const uploadZone = document.getElementById('upload-zone');
+    const fileInput = document.getElementById('file-input');
+    const progressSection = document.getElementById('progress-section');
+    const progressFill = document.getElementById('progress-fill');
+    const statusText = document.getElementById('status-text');
+    const errorMessage = document.getElementById('error-message');
+    const modeBadge = document.getElementById('mode-badge');
+    const qualityPanel = document.getElementById('quality-panel');
+    const orbitPanel = document.getElementById('orbit-panel');
+    const resetBtn = document.getElementById('reset-btn');
+    const playBtn = document.getElementById('play-btn');
+    const exportBtn = document.getElementById('export-btn');
+
+    // Sliders
+    const yawSlider = document.getElementById('yaw-slider');
+    const pitchSlider = document.getElementById('pitch-slider');
+    const rollSlider = document.getElementById('roll-slider');
+    const yawValue = document.getElementById('yaw-value');
+    const pitchValue = document.getElementById('pitch-value');
+    const rollValue = document.getElementById('roll-value');
+
+    // Score displays
+    const maskScore = document.getElementById('mask-score');
+    const poseScore = document.getElementById('pose-score');
+    const trackScore = document.getElementById('track-score');
+    const depthScore = document.getElementById('depth-score');
+
+    let viewer = null;
+    let currentScene = null;
+
+    // Initialize viewer
+    async function init() {
+      try {
+        viewer = await createOrbitViewer(canvas);
+
+        // Load dummy scene for demo
+        viewer.loadDummyScene();
+
+        // Enable buttons
+        resetBtn.disabled = false;
+      } catch (error) {
+        showError(`WebGPU initialization failed: ${error.message}`);
+      }
+    }
+
+    // Handle file upload
+    async function handleFile(file) {
+      if (!file.type.startsWith('video/')) {
+        showError('Please upload a video file');
+        return;
+      }
+
+      hideError();
+      showProgress();
+
+      try {
+        // Step 1: Upload video directly to backend (0-40% progress)
+        updateProgress(0, 'uploading');
+        statusText.textContent = 'Uploading video...';
+
+        const { videoId, sizeBytes } = await modalClient.uploadVideo(file, (p) => {
+          const uploadPercent = p.percent * 0.4; // 0-40%
+          updateProgress(uploadPercent, 'uploading');
+          statusText.textContent = `Uploading video... ${p.percent}%`;
+        });
+
+        console.log(`Video uploaded: ${videoId} (${(sizeBytes / 1024 / 1024).toFixed(1)}MB)`);
+
+        // Step 2: Submit job with video_id (40-45% progress)
+        updateProgress(40, 'submitting');
+        statusText.textContent = 'Submitting job...';
+
+        const submitResult = await modalClient.submitJobWithVideo({
+          videoId,
+          maxFrames: 150,
+          targetFps: 10,
+        });
+
+        currentJobId = submitResult.jobId;
+        console.log(`Job submitted: ${currentJobId}`);
+
+        // Step 3: Poll for completion (45-100% progress)
+        updateProgress(45, 'processing');
+        statusText.textContent = 'Processing video...';
+
+        const result = await modalClient.waitForCompletion(
+          currentJobId,
+          (status) => {
+            // Map backend progress (0-100) to our range (45-100)
+            const progress = status.progress || 0;
+            const mappedProgress = 45 + (progress * 0.55);
+            const stage = status.stage || 'processing';
+            updateProgress(mappedProgress, stage);
+            statusText.textContent = `${stage.replace(/-/g, ' ')}... ${Math.round(progress)}%`;
+          },
+          2000, // Poll every 2 seconds
+          3600000 // 1 hour timeout
+        );
+
+        // Processing complete - show results and load scene
+        await onProcessingComplete(result);
+
+      } catch (error) {
+        console.error('Processing failed:', error);
+        hideProgress();
+        showError(`Processing failed: ${error.message}`);
+      }
+    }
+
+    async function onProcessingComplete(result) {
+      hideProgress();
+
+      // Show quality panel
+      qualityPanel.classList.remove('hidden');
+      orbitPanel.classList.remove('hidden');
+      modeBadge.classList.remove('hidden');
+
+      // Extract quality scores from result
+      const quality = result?.quality || {};
+
+      // Get scores from backend quality objects
+      const maskQuality = quality.mask?.score ?? 0.5;
+      const poseQuality = quality.pose?.score ?? 0.5;
+      const trackQuality = quality.track?.score ?? 0.5;
+      const depthQuality = quality.depth?.score ?? 0.5;
+
+      // Set real scores from backend
+      setScoreDisplay(maskScore, maskQuality);
+      setScoreDisplay(poseScore, poseQuality);
+      setScoreDisplay(trackScore, trackQuality);
+      setScoreDisplay(depthScore, depthQuality);
+
+      // Enable buttons
+      playBtn.disabled = false;
+      exportBtn.disabled = false;
+
+      // Update mode badge from result
+      const mode = result?.mode || 'full-orbit';
+      const modeLabels = {
+        'full-orbit': 'Full Orbit',
+        'micro-parallax': 'Micro Parallax',
+        '2.5d-subject': '2.5D Subject',
+        'render-only': 'Render Only',
+      };
+
+      modeBadge.textContent = modeLabels[mode] || mode;
+      modeBadge.className = `mode-badge mode-${mode}`;
+
+      console.log('Processing complete:', result);
+
+      // Load scene into viewer
+      if (viewer && currentJobId) {
+        try {
+          const scenePackUrl = getScenePackUrl(currentJobId);
+          console.log('[Orbit] Loading scene from:', scenePackUrl);
+          await viewer.loadScene(scenePackUrl);
+          console.log('[Orbit] Scene loaded successfully');
+        } catch (err) {
+          console.error('[Orbit] Failed to load scene:', err);
+          // Fallback to dummy scene
+          viewer.loadDummyScene();
+        }
+      } else if (viewer) {
+        viewer.loadDummyScene();
+      }
+    }
+
+    function setScoreDisplay(element, score) {
+      const percentage = Math.round(score * 100);
+      element.textContent = `${percentage}%`;
+
+      element.classList.remove('good', 'warning', 'bad');
+      if (score >= 0.8) {
+        element.classList.add('good');
+      } else if (score >= 0.6) {
+        element.classList.add('warning');
+      } else {
+        element.classList.add('bad');
+      }
+    }
+
+    function showProgress() {
+      progressSection.classList.remove('hidden');
+      uploadZone.classList.add('hidden');
+    }
+
+    function hideProgress() {
+      progressSection.classList.add('hidden');
+      uploadZone.classList.remove('hidden');
+    }
+
+    function updateProgress(percent, stage) {
+      progressFill.style.width = `${percent}%`;
+      statusText.textContent = `${stage.replace(/-/g, ' ')}... ${Math.round(percent)}%`;
+    }
+
+    function showError(message) {
+      errorMessage.textContent = message;
+      errorMessage.classList.remove('hidden');
+    }
+
+    function hideError() {
+      errorMessage.classList.add('hidden');
+    }
+
+    // Event Listeners
+    uploadZone.addEventListener('click', () => fileInput.click());
+
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('dragging');
+    });
+
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('dragging');
+    });
+
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('dragging');
+      const file = e.dataTransfer.files[0];
+      if (file) handleFile(file);
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) handleFile(file);
+    });
+
+    resetBtn.addEventListener('click', () => {
+      if (viewer) {
+        viewer.resetCamera();
+        yawSlider.value = 0;
+        pitchSlider.value = 0;
+        rollSlider.value = 0;
+        yawValue.textContent = '0°';
+        pitchValue.textContent = '0°';
+        rollValue.textContent = '0°';
+      }
+    });
+
+    // Slider controls
+    yawSlider.addEventListener('input', (e) => {
+      yawValue.textContent = `${e.target.value}°`;
+    });
+
+    pitchSlider.addEventListener('input', (e) => {
+      pitchValue.textContent = `${e.target.value}°`;
+    });
+
+    rollSlider.addEventListener('input', (e) => {
+      rollValue.textContent = `${e.target.value}°`;
+    });
+
+    exportBtn.addEventListener('click', () => {
+      statusText.textContent = 'Exporting MP4...';
+      progressSection.classList.remove('hidden');
+      progressFill.style.width = '0%';
+
+      // Simulate export
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 2;
+        progressFill.style.width = `${progress}%`;
+        statusText.textContent = `Exporting MP4... ${progress}%`;
+
+        if (progress >= 100) {
+          clearInterval(interval);
+          progressSection.classList.add('hidden');
+          alert('Export complete! (Demo mode - no actual file generated)');
+        }
+      }, 50);
+    });
+
+    // Resize handling
+    function handleResize() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      if (viewer) {
+        viewer.resize(rect.width, rect.height);
+      }
+    }
+
+    window.addEventListener('resize', handleResize);
+    handleResize();
+
+    // Initialize
+    init();
+  </script>
+</body>
+</html>

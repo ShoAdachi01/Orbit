@@ -1,0 +1,29 @@
+{
+  "name": "orbit",
+  "version": "1.0.0",
+  "description": "Turn a single creator video into a bounded parallax orbit preview + high-fidelity exported MP4",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.10",
+    "@ffmpeg/util": "^0.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@webgpu/types": "^0.1.40",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

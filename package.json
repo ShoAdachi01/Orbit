@@ -1,7 +1,7 @@
 {
   "name": "orbit",
   "version": "1.0.0",
-  "description": "Turn a single creator video into a bounded parallax orbit preview + high-fidelity exported MP4",
+  "description": "Create a single-frame 3D preview and generate a new-angle video with Veo 3.1",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

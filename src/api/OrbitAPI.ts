@@ -8,11 +8,8 @@ import {
   JobStatus,
   PipelineStage,
   ProgressEvent,
-  QualityReport,
-  OrbitMode,
-  OrbitBounds,
-  CameraPath,
-  OrbitSceneManifest,
+  OutputOrientation,
+  PreviewCameraPose,
 } from '../schemas/types';
 
 // ============================================================================
@@ -35,21 +32,25 @@ export interface SubmitJobRequest {
 
 /** Processing options */
 export interface ProcessingOptions {
-  /** Target output resolution (default: match input) */
+  /** Snapshot time in seconds from video start */
+  snapshotTimeSec?: number;
+  /** Segment start time in seconds */
+  segmentStartSec?: number;
+  /** Segment end time in seconds */
+  segmentEndSec?: number;
+  /** Output orientation */
+  orientation?: OutputOrientation;
+  /** Camera pose for preview + Veo generation */
+  cameraPose?: PreviewCameraPose;
+  /** Target output resolution (optional) */
   resolution?: {
     width: number;
     height: number;
   };
-  /** Target output FPS (default: match input) */
+  /** Target output FPS (optional) */
   fps?: number;
-  /** Quality preset */
-  qualityPreset?: 'fast' | 'balanced' | 'quality';
-  /** Custom orbit bounds (default: standard bounds) */
-  customBounds?: Partial<OrbitBounds>;
-  /** Skip refinement step */
-  skipRefinement?: boolean;
-  /** Force specific mode (for testing) */
-  forceMode?: OrbitMode;
+  /** Output duration in seconds (default: match input segment) */
+  durationSec?: number;
 }
 
 /** Callback configuration */
@@ -97,29 +98,22 @@ export interface JobStatusResponse {
 
 /** Job result details */
 export interface JobResultResponse {
-  /** OrbitScene pack download URL */
-  scenePackUrl: string;
-  /** Base render MP4 URL */
-  baseRenderUrl: string;
-  /** Refined render MP4 URL (if available) */
-  refinedRenderUrl?: string;
-  /** Quality report */
-  quality: QualityReport;
-  /** Selected mode and reasons */
-  mode: {
-    selected: OrbitMode;
-    label: string;
-    description: string;
-    reasons: string[];
-  };
-  /** Debug artifacts (if enabled) */
-  debugArtifacts?: {
-    maskPreviewUrl: string;
-    poseOverlayUrl: string;
-    depthPreviewUrl: string;
-    trackOverlayUrl: string;
-    qualityReportUrl: string;
-    logsUrl: string;
+  /** Snapshot image URL */
+  snapshotUrl: string;
+  /** 3D reconstruction asset URL */
+  reconstructionUrl: string;
+  /** Preview still URL */
+  previewImageUrl: string;
+  /** Veo-generated video URL */
+  veoVideoUrl: string;
+  /** Output orientation */
+  orientation: OutputOrientation;
+  /** Output metadata */
+  metadata?: {
+    duration: number;
+    width: number;
+    height: number;
+    fps?: number;
   };
 }
 
@@ -145,74 +139,6 @@ export interface CompletionEventPayload {
   timestamp: string;
   result?: JobResultResponse;
   error?: string;
-}
-
-// ============================================================================
-// Viewer API
-// ============================================================================
-
-/** Request to render a frame from OrbitScene */
-export interface RenderFrameRequest {
-  /** Scene pack URL */
-  scenePackUrl: string;
-  /** Camera position for this frame */
-  camera: {
-    position: [number, number, number];
-    rotation: [number, number, number, number];
-    fov: number;
-  };
-  /** Frame timestamp (for 4D subject) */
-  timestamp: number;
-  /** Output resolution */
-  resolution: {
-    width: number;
-    height: number;
-  };
-}
-
-/** Response with rendered frame */
-export interface RenderFrameResponse {
-  /** Base64-encoded PNG frame */
-  frameData: string;
-  /** Render metadata */
-  metadata: {
-    renderTime: number;
-    splatsRendered: number;
-    mode: OrbitMode;
-  };
-}
-
-// ============================================================================
-// Export API
-// ============================================================================
-
-/** Request to export video from OrbitScene */
-export interface ExportVideoRequest {
-  /** Scene pack URL */
-  scenePackUrl: string;
-  /** Camera path for the export */
-  cameraPath: CameraPath;
-  /** Output options */
-  output: {
-    format: 'mp4' | 'webm';
-    codec: 'h264' | 'h265' | 'vp9';
-    quality: number;
-    resolution: {
-      width: number;
-      height: number;
-    };
-    fps: number;
-  };
-  /** Apply refinement to export */
-  applyRefinement: boolean;
-}
-
-/** Response from export request */
-export interface ExportVideoResponse {
-  /** Export job ID */
-  exportId: string;
-  /** Status URL */
-  statusUrl: string;
 }
 
 // ============================================================================
@@ -252,12 +178,6 @@ export interface OrbitApiClient {
 
   /** Get job result (when completed) */
   getJobResult(jobId: string): Promise<JobResultResponse>;
-
-  /** Render a single frame */
-  renderFrame(request: RenderFrameRequest): Promise<RenderFrameResponse>;
-
-  /** Export video */
-  exportVideo(request: ExportVideoRequest): Promise<ExportVideoResponse>;
 }
 
 // ============================================================================
@@ -315,14 +235,6 @@ export class OrbitApiClientImpl implements OrbitApiClient {
   async getJobResult(jobId: string): Promise<JobResultResponse> {
     return this.request<JobResultResponse>('GET', `/api/v1/jobs/${jobId}/result`);
   }
-
-  async renderFrame(request: RenderFrameRequest): Promise<RenderFrameResponse> {
-    return this.request<RenderFrameResponse>('POST', '/api/v1/render/frame', request);
-  }
-
-  async exportVideo(request: ExportVideoRequest): Promise<ExportVideoResponse> {
-    return this.request<ExportVideoResponse>('POST', '/api/v1/export/video', request);
-  }
 }
 
 /**
@@ -345,7 +257,9 @@ export interface ModalSubmitRequest {
   width: number;
   height: number;
   fps?: number;
-  prompt_points?: Array<{ x: number; y: number; label?: number }>;
+  snapshot_time_sec?: number;
+  orientation?: OutputOrientation;
+  camera_pose?: PreviewCameraPose;
   options?: Record<string, unknown>;
 }
 
@@ -364,25 +278,16 @@ export interface ModalJobStatus {
 export interface ModalJobResult {
   job_id: string;
   status: string;
-  mode: string;
-  bounds: {
-    maxYaw: number;
-    maxPitch: number;
-    maxRoll: number;
-    maxTranslation: number;
-  };
-  quality: {
-    mask: Record<string, unknown>;
-    pose: Record<string, unknown>;
-    track: Record<string, unknown>;
-    depth: Record<string, unknown>;
-    gate_results: Record<string, unknown>;
-  };
-  assets: {
-    masks: string[];
-    poses: string;
-    depth: string[];
-    tracks: string;
+  snapshot_url: string;
+  reconstruction_url: string;
+  preview_image_url: string;
+  veo_video_url: string;
+  orientation: OutputOrientation;
+  metadata?: {
+    duration: number;
+    width: number;
+    height: number;
+    fps?: number;
   };
 }
 

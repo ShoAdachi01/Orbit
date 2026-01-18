@@ -3,6 +3,8 @@
  * Defines contracts for integrating with external ML models
  */
 
+import type { OutputOrientation, PreviewCameraPose } from '../schemas/types';
+
 // ============================================================================
 // Common Types
 // ============================================================================
@@ -347,6 +349,115 @@ export interface VideoDiffusionModel {
 }
 
 // ============================================================================
+// SAM 3D Body (Single-Image Human Mesh)
+// ============================================================================
+
+export interface SAM3DBodyConfig extends ModelConfig {
+  /** Optional detector override */
+  detector?: 'sam3' | 'vitdet';
+}
+
+export interface SAM3DBodyInput {
+  /** Image as Uint8Array (RGB) */
+  image: Uint8Array;
+  width: number;
+  height: number;
+  /** Optional mask for the human */
+  mask?: Uint8Array;
+  /** Optional keypoints */
+  keypoints?: Array<{ x: number; y: number; confidence?: number }>;
+}
+
+export interface SAM3DBodyOutput {
+  /** Mesh vertices */
+  vertices: Float32Array;
+  /** Mesh faces (triangles) */
+  faces: Uint32Array;
+  /** Mesh format */
+  format: 'mhr';
+}
+
+export interface SAM3DBodyModel {
+  initialize(config: SAM3DBodyConfig): Promise<void>;
+  reconstruct(input: SAM3DBodyInput): Promise<InferenceResult<SAM3DBodyOutput>>;
+  destroy(): void;
+}
+
+// ============================================================================
+// Nano Banana Pro (Preview Still Generation)
+// ============================================================================
+
+export interface NanoBananaConfig extends ModelConfig {
+  /** Optional style/prompt override */
+  style?: string;
+}
+
+export interface NanoBananaInput {
+  /** Reference image (anchor frame) */
+  image: Uint8Array;
+  width: number;
+  height: number;
+  /** Desired camera pose */
+  cameraPose?: PreviewCameraPose;
+  /** Output orientation */
+  orientation?: OutputOrientation;
+  /** Optional prompt */
+  prompt?: string;
+}
+
+export interface NanoBananaOutput {
+  /** Generated image */
+  image: Uint8Array;
+  width: number;
+  height: number;
+}
+
+export interface NanoBananaModel {
+  initialize(config: NanoBananaConfig): Promise<void>;
+  generate(input: NanoBananaInput): Promise<InferenceResult<NanoBananaOutput>>;
+  destroy(): void;
+}
+
+// ============================================================================
+// Veo 3.1 (Video Generation)
+// ============================================================================
+
+export interface VeoConfig extends ModelConfig {
+  /** Optional style/prompt override */
+  style?: string;
+}
+
+export interface VeoInput {
+  /** Reference image to start the video */
+  referenceImage: Uint8Array;
+  width: number;
+  height: number;
+  /** Duration in seconds */
+  durationSec: number;
+  /** Optional prompt */
+  prompt?: string;
+  /** Output orientation */
+  orientation?: OutputOrientation;
+  /** Output fps */
+  fps?: number;
+}
+
+export interface VeoOutput {
+  /** Encoded video payload */
+  video: Uint8Array;
+  width: number;
+  height: number;
+  durationSec: number;
+  fps: number;
+}
+
+export interface VeoModel {
+  initialize(config: VeoConfig): Promise<void>;
+  generate(input: VeoInput): Promise<InferenceResult<VeoOutput>>;
+  destroy(): void;
+}
+
+// ============================================================================
 // Model Factory
 // ============================================================================
 
@@ -357,6 +468,9 @@ export interface ModelFactory {
   createCOLMAP(): COLMAPModel;
   createFaceEmbedding(): FaceEmbeddingModel;
   createVideoDiffusion(): VideoDiffusionModel;
+  createSAM3DBody(): SAM3DBodyModel;
+  createNanoBanana(): NanoBananaModel;
+  createVeo(): VeoModel;
 }
 
 /**
@@ -371,6 +485,9 @@ export function getModelFactory(): ModelFactory {
     createCOLMAP: () => new StubCOLMAPModel(),
     createFaceEmbedding: () => new StubFaceEmbeddingModel(),
     createVideoDiffusion: () => new StubVideoDiffusionModel(),
+    createSAM3DBody: () => new StubSAM3DBodyModel(),
+    createNanoBanana: () => new StubNanoBananaModel(),
+    createVeo: () => new StubVeoModel(),
   };
 }
 
@@ -591,5 +708,90 @@ class StubVideoDiffusionModel implements VideoDiffusionModel {
 
   destroy(): void {
     console.log('[StubVideoDiffusion] Destroyed');
+  }
+}
+
+class StubSAM3DBodyModel implements SAM3DBodyModel {
+  async initialize(_config: SAM3DBodyConfig): Promise<void> {
+    console.log('[StubSAM3DBody] Initialized');
+  }
+
+  async reconstruct(_input: SAM3DBodyInput): Promise<InferenceResult<SAM3DBodyOutput>> {
+    const vertices = new Float32Array([
+      -0.5, -0.5, 0,
+      0.5, -0.5, 0,
+      0.5, 0.5, 0,
+      -0.5, 0.5, 0,
+      0, 0, 1,
+    ]);
+
+    const faces = new Uint32Array([
+      0, 1, 4,
+      1, 2, 4,
+      2, 3, 4,
+      3, 0, 4,
+      0, 1, 2,
+      2, 3, 0,
+    ]);
+
+    return {
+      success: true,
+      data: {
+        vertices,
+        faces,
+        format: 'mhr',
+      },
+      inferenceTime: 400,
+    };
+  }
+
+  destroy(): void {
+    console.log('[StubSAM3DBody] Destroyed');
+  }
+}
+
+class StubNanoBananaModel implements NanoBananaModel {
+  async initialize(_config: NanoBananaConfig): Promise<void> {
+    console.log('[StubNanoBanana] Initialized');
+  }
+
+  async generate(input: NanoBananaInput): Promise<InferenceResult<NanoBananaOutput>> {
+    return {
+      success: true,
+      data: {
+        image: input.image,
+        width: input.width,
+        height: input.height,
+      },
+      inferenceTime: 300,
+    };
+  }
+
+  destroy(): void {
+    console.log('[StubNanoBanana] Destroyed');
+  }
+}
+
+class StubVeoModel implements VeoModel {
+  async initialize(_config: VeoConfig): Promise<void> {
+    console.log('[StubVeo] Initialized');
+  }
+
+  async generate(input: VeoInput): Promise<InferenceResult<VeoOutput>> {
+    return {
+      success: true,
+      data: {
+        video: new Uint8Array(0),
+        width: input.width,
+        height: input.height,
+        durationSec: input.durationSec,
+        fps: input.fps || 30,
+      },
+      inferenceTime: Math.round(input.durationSec * 1000),
+    };
+  }
+
+  destroy(): void {
+    console.log('[StubVeo] Destroyed');
   }
 }

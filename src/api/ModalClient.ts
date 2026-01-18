@@ -4,7 +4,7 @@
  */
 
 import { config } from '../config';
-import type { QualityReport, OrbitMode, OrbitBounds } from '../schemas/types';
+import type { OutputOrientation, PreviewCameraPose } from '../schemas/types';
 
 export interface ModalJobRequest {
   /** Video frames as base64 encoded strings */
@@ -15,8 +15,22 @@ export interface ModalJobRequest {
   height: number;
   /** Video FPS */
   fps: number;
-  /** Optional prompt points for segmentation */
-  promptPoints?: Array<{ x: number; y: number; label?: number }>;
+  /** Snapshot time in seconds */
+  snapshotTimeSec?: number;
+  /** Output orientation */
+  orientation?: OutputOrientation;
+  /** Camera pose for preview + Veo generation */
+  cameraPose?: PreviewCameraPose;
+  /** Segment start in seconds */
+  segmentStartSec?: number;
+  /** Segment end in seconds */
+  segmentEndSec?: number;
+  /** Pipeline to run */
+  pipeline?: 'reconstruction' | 'generation';
+  /** Optional generation options */
+  options?: Record<string, unknown> & {
+    durationSec?: number;
+  };
 }
 
 export interface ModalJobStatus {
@@ -32,20 +46,17 @@ export interface ModalJobStatus {
 export interface ModalJobResult {
   jobId: string;
   status: string;
-  mode: OrbitMode;
-  bounds: OrbitBounds;
-  quality: {
-    mask: QualityReport['mask'];
-    pose: QualityReport['pose'];
-    track: QualityReport['track'];
-    depth: QualityReport['depth'];
-    gateResults: Record<string, { passed: boolean; reasons?: string[] }>;
-  };
-  assets: {
-    masks: string[];
-    poses?: string;
-    depth?: string[];
-    tracks?: string;
+  snapshotUrl?: string;
+  reconstructionUrl?: string;
+  previewImageUrl?: string;
+  veoVideoUrl?: string;
+  orientation?: OutputOrientation;
+  warnings?: string[];
+  metadata?: {
+    duration: number;
+    width: number;
+    height: number;
+    fps?: number;
   };
   error?: string;
 }
@@ -76,6 +87,7 @@ export class ModalClient {
    * Submit a video processing job to Modal backend
    */
   async submitJob(request: ModalJobRequest): Promise<{ jobId: string }> {
+    const optionsPayload = normalizeOptions(request.options);
     const response = await fetch(this.getEndpointUrl('submit_job'), {
       method: 'POST',
       headers: {
@@ -86,7 +98,13 @@ export class ModalClient {
         width: request.width,
         height: request.height,
         fps: request.fps,
-        prompt_points: request.promptPoints,
+        snapshot_time_sec: request.snapshotTimeSec,
+        orientation: request.orientation,
+        camera_pose: request.cameraPose,
+        segment_start_sec: request.segmentStartSec,
+        segment_end_sec: request.segmentEndSec,
+        pipeline: request.pipeline,
+        options: optionsPayload,
       }),
     });
 
@@ -134,7 +152,8 @@ export class ModalClient {
       throw new Error(`Failed to get job result: ${response.statusText}`);
     }
 
-    return response.json();
+    const data = await response.json();
+    return this.normalizeJobResult(data);
   }
 
   /**
@@ -241,8 +260,17 @@ export class ModalClient {
     videoId: string;
     maxFrames?: number;
     targetFps?: number;
-    promptPoints?: Array<{ x: number; y: number; label?: number }>;
+    snapshotTimeSec?: number;
+    orientation?: OutputOrientation;
+    cameraPose?: PreviewCameraPose;
+    segmentStartSec?: number;
+    segmentEndSec?: number;
+    pipeline?: 'reconstruction' | 'generation';
+    options?: Record<string, unknown> & {
+      durationSec?: number;
+    };
   }): Promise<{ jobId: string }> {
+    const optionsPayload = normalizeOptions(request.options);
     const response = await fetch(this.getEndpointUrl('submit_job'), {
       method: 'POST',
       headers: {
@@ -252,7 +280,13 @@ export class ModalClient {
         video_id: request.videoId,
         max_frames: request.maxFrames || 150,
         target_fps: request.targetFps || 10,
-        prompt_points: request.promptPoints,
+        snapshot_time_sec: request.snapshotTimeSec,
+        orientation: request.orientation,
+        camera_pose: request.cameraPose,
+        segment_start_sec: request.segmentStartSec,
+        segment_end_sec: request.segmentEndSec,
+        pipeline: request.pipeline,
+        options: optionsPayload,
       }),
     });
 
@@ -267,6 +301,43 @@ export class ModalClient {
 
     return { jobId: data.job_id };
   }
+
+  private resolveAssetUrl(url?: string): string | undefined {
+    if (!url) return undefined;
+    if (/^https?:\/\//i.test(url)) {
+      return url;
+    }
+    const cleanBase = this.baseUrl.replace(/\/$/, '');
+    const path = url.startsWith('/') ? url : `/${url}`;
+    return `${cleanBase}${path}`;
+  }
+
+  private normalizeJobResult(data: any): ModalJobResult {
+    return {
+      jobId: data.job_id ?? data.jobId ?? '',
+      status: data.status ?? 'completed',
+      snapshotUrl: this.resolveAssetUrl(data.snapshot_url ?? data.snapshotUrl),
+      reconstructionUrl: this.resolveAssetUrl(data.reconstruction_url ?? data.reconstructionUrl),
+      previewImageUrl: this.resolveAssetUrl(data.preview_image_url ?? data.previewImageUrl),
+      veoVideoUrl: this.resolveAssetUrl(data.veo_video_url ?? data.veoVideoUrl),
+      orientation: data.orientation,
+      warnings: data.warnings,
+      metadata: data.metadata,
+      error: data.error,
+    };
+  }
+}
+
+function normalizeOptions(
+  options?: Record<string, unknown> & { durationSec?: number }
+): Record<string, unknown> | undefined {
+  if (!options) return undefined;
+  const payload: Record<string, unknown> = { ...options };
+  if (payload.durationSec !== undefined && payload.duration_sec === undefined) {
+    payload.duration_sec = payload.durationSec;
+  }
+  delete payload.durationSec;
+  return Object.keys(payload).length ? payload : undefined;
 }
 
 /**
